@@ -5,7 +5,10 @@ use std::net::SocketAddr;
 
 use crate::core_proto;
 use anyhow::Result;
-use core_proto::{CommitRequest, CommitResponse, PrepareCommitRequest, PrepareCommitResponse};
+use core_proto::{
+    AbortRequest, AbortResponse, CommitRequest, CommitResponse, PrepareCommitRequest,
+    PrepareCommitResponse,
+};
 use tonic::{transport::Server, Request, Response, Status};
 
 #[tracing::instrument(name = "grpc_server::start", skip_all, fields(
@@ -37,6 +40,16 @@ impl core_proto::core_proto::node_server::Node for NodeService {
         &self,
         request: Request<PrepareCommitRequest>,
     ) -> Result<Response<PrepareCommitResponse>, Status> {
+        todo!()
+    }
+
+    #[tracing::instrument(name = "NodeService::abort", skip_all, fields(
+        request = ?request
+    ))]
+    async fn abort(
+        &self,
+        request: Request<AbortRequest>,
+    ) -> Result<Response<AbortResponse>, Status> {
         todo!()
     }
 

@@ -2,9 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
+use crate::transaction_manager::TransactionManager;
+
 mod core_proto;
 mod grpc_server;
 mod http_server;
+mod storage;
+mod transaction_manager;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -30,6 +34,10 @@ async fn main() -> Result<()> {
         cluster_members: vec![],
     };
 
+    let node_services = todo!();
+
+    let transaction_manager = TransactionManager::new(node_services);
+
     tokio::spawn(async move {
         if let Err(err) = grpc_server::start(grpc_server_addr).await {
             error!(?err, "unable to start grpc server");
@@ -38,7 +46,7 @@ async fn main() -> Result<()> {
     });
 
     tokio::spawn(async move {
-        if let Err(err) = http_server::start(http_server_port).await {
+        if let Err(err) = http_server::start(transaction_manager, http_server_port).await {
             error!(?err, "unable to start http server");
             std::process::exit(1);
         }

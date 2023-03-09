@@ -4,6 +4,7 @@ package core;
 
 service Node {
     rpc PrepareCommit(PrepareCommitRequest) returns (PrepareCommitResponse) {}
+    rpc Abort(AbortRequest) returns (AbortResponse) {}
     rpc Commit(CommitRequest) returns (CommitResponse) {}
 }
 
@@ -16,10 +17,26 @@ message PrepareCommitResponse {
     bool ok = 1;
 }
 
+message AbortRequest {
+    string id = 1;
+}
+
+message AbortResponse {
+    bool ok = 1;
+}
+
 message CommitRequest {
     string id = 1;
 }
 
 message CommitResponse {
     bool ok = 1;
+}
+
+message CommitTransactionDecision {
+    string id = 1;
+}
+
+message TransactionCommitted {
+    string id = 1;
 }

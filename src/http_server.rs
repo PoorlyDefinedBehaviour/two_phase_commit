@@ -2,12 +2,21 @@
 //! to start a new transaction for example.
 
 use anyhow::Result;
-use axum::{response::IntoResponse, routing::post, Router};
-use tracing::info;
+use axum::{
+    http::{Response, StatusCode},
+    routing::post,
+    Extension, Json, Router,
+};
+use std::sync::Arc;
+use tracing::{error, info};
+
+use crate::transaction_manager::TransactionManager;
 
 #[tracing::instrument(name = "http_server::start", skip_all)]
-pub async fn start(port: u16) -> Result<()> {
-    let app = Router::new().route("/", post(handle_request));
+pub async fn start(transaction_manager: TransactionManager, port: u16) -> Result<()> {
+    let app = Router::new()
+        .route("/", post(handle_request))
+        .layer(Extension(Arc::new(transaction_manager)));
     let addr = format!("0.0.0.0:{port}").parse()?;
 
     info!(?addr, "starting server");
@@ -18,7 +27,28 @@ pub async fn start(port: u16) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct HandleRequestInput {
+    pub op: u8,
+}
+
 #[tracing::instrument(name = "handle_request", skip_all)]
-async fn handle_request() -> impl IntoResponse {
-    todo!()
+#[axum_macros::debug_handler]
+async fn handle_request(
+    Extension(transaction_manager): Extension<Arc<TransactionManager>>,
+    Json(input): Json<HandleRequestInput>,
+) -> Response<String> {
+    match transaction_manager.handle_request(input.op).await {
+        Ok(_) => Response::builder()
+            .status(StatusCode::OK)
+            .body("OK".to_owned())
+            .unwrap(),
+        Err(err) => {
+            error!(?err, "unable to handle user request");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(err.to_string())
+                .unwrap()
+        }
+    }
 }
