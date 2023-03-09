@@ -1,5 +1,5 @@
-//! The grpc server is used to internal requests.
-//! Prepare and commit requests are send using grpc.
+//! The grpc server is used to send internal requests.
+//! Prepare and commit requests are sent using grpc.
 
 use std::net::SocketAddr;
 
