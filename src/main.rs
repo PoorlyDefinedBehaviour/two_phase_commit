@@ -5,6 +5,7 @@ use tracing::error;
 use crate::transaction_manager::TransactionManager;
 
 mod core_proto;
+mod failure_sim;
 mod grpc_server;
 mod http_server;
 mod storage;

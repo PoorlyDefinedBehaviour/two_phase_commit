@@ -4,14 +4,15 @@ use anyhow::{anyhow, Context, Result};
 use prost::Message;
 use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request};
-use tracing::error;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
     core_proto::{
         node_client::NodeClient, AbortRequest, CommitRequest, CommitTransactionDecision, HostAddr,
-        PrepareCommitRequest, TransactionCommitted, HOST_ADDR_HEADER_KEY,
+        PrepareCommitRequest, TransactionAborted, TransactionCommitted, HOST_ADDR_HEADER_KEY,
     },
+    failure_sim,
     storage::StableStorage,
 };
 
@@ -152,5 +153,76 @@ impl TransactionManager {
         }
 
         Ok(())
+    }
+
+    /// Handles a request to prepare to commit when acting as a participant.
+    #[tracing::instrument(name = "TransactionManager::prepare_commit", skip_all, fields(
+        request = ?request
+    ))]
+    async fn prepare_commit(&self, request: PrepareCommitRequest) -> Result<bool> {
+        if failure_sim::prepare_commit_should_fail() {
+            info!("simulating(ERROR): participant cannot go ahead with the transaction because");
+            return Err(anyhow!("simulating(ERROR): participant is in error mode"));
+        }
+        if !failure_sim::participant_should_be_able_to_commit() {
+            info!("simulating: participant is unable to go ahead with the transaction");
+            return Ok(false);
+        }
+
+        // Assuming the participant can proceed with the trasaction.
+        let commit_decision = CommitTransactionDecision {
+            id: request.id.clone(),
+        };
+
+        // Store the decision in stable storage so it can be remembed when a crash happens.
+        let mut buffer = Vec::new();
+        commit_decision.encode(&mut buffer)?;
+        self.stable_storage
+            .append(commit_decision.id.as_bytes(), &buffer)
+            .await?;
+        self.stable_storage.flush().await?;
+
+        // Let the transaction manager know that this participant is ready to commit.
+        Ok(true)
+    }
+
+    /// Handles a request to abort when acting as a participant.
+    #[tracing::instrument(name = "TransactionManager::abort", skip_all, fields(
+        request = ?request
+    ))]
+    async fn abort(&self, request: AbortRequest) -> Result<()> {
+        if failure_sim::abort_should_fail() {
+            return Err(anyhow!("simulating(ERROR): abort failure"));
+        }
+
+        let decision = TransactionAborted { id: request.id };
+        let mut buffer = Vec::new();
+        decision.encode(&mut buffer)?;
+        self.stable_storage
+            .append(decision.id.as_bytes(), &buffer)
+            .await?;
+        self.stable_storage.flush().await?;
+
+        Ok(())
+    }
+
+    /// Handles a request to commit when acting as a participant.
+    #[tracing::instrument(name = "TransactionManager::commit", skip_all, fields(
+        request = ?request
+    ))]
+    async fn commit(&self, request: CommitRequest) -> Result<()> {
+        if failure_sim::commit_should_fail() {
+            return Err(anyhow!("simulating(ERROR): commit failure"));
+        }
+
+        let decision = TransactionCommitted { id: request.id };
+        let mut buffer = Vec::new();
+        decision.encode(&mut buffer)?;
+        self.stable_storage
+            .append(decision.id.as_bytes(), &buffer)
+            .await?;
+        self.stable_storage.flush().await?;
+
+        todo!()
     }
 }

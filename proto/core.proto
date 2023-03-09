@@ -40,3 +40,7 @@ message CommitTransactionDecision {
 message TransactionCommitted {
     string id = 1;
 }
+
+message TransactionAborted {
+    string id = 1;
+}

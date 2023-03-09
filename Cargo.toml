@@ -13,6 +13,7 @@ axum-macros = "0.3.5"
 clap = { version = "4.1.8", features = ["derive"] }
 futures = "0.3.26"
 prost = "0.11.8"
+rand = "0.8.5"
 serde = { version = "1.0.154", features = ["derive"] }
 tokio = { version = "1.26.0", features = ["rt-multi-thread", "macros", "sync"] }
 tonic = "0.8.3"

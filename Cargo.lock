@@ -1172,6 +1172,7 @@ dependencies = [
  "clap",
  "futures",
  "prost",
+ "rand",
  "serde",
  "tokio",
  "tonic",
