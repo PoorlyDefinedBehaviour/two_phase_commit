@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package core;
+
+service Node {
+    rpc PrepareCommit(PrepareCommitRequest) returns (PrepareCommitResponse) {}
+    rpc Commit(CommitRequest) returns (CommitResponse) {}
+}
+
+message PrepareCommitRequest {
+    string id = 1;
+    int32 op = 2;
+}
+
+message PrepareCommitResponse {
+    bool ok = 1;
+}
+
+message CommitRequest {
+    string id = 1;
+}
+
+message CommitResponse {
+    bool ok = 1;
+}
