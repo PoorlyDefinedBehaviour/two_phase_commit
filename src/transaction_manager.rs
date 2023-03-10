@@ -159,7 +159,7 @@ impl TransactionManager {
     #[tracing::instrument(name = "TransactionManager::prepare_commit", skip_all, fields(
         request = ?request
     ))]
-    async fn prepare_commit(&self, request: PrepareCommitRequest) -> Result<bool> {
+    pub async fn prepare_commit(&self, request: PrepareCommitRequest) -> Result<bool> {
         if failure_sim::prepare_commit_should_fail() {
             info!("simulating(ERROR): participant cannot go ahead with the transaction because");
             return Err(anyhow!("simulating(ERROR): participant is in error mode"));
@@ -190,7 +190,7 @@ impl TransactionManager {
     #[tracing::instrument(name = "TransactionManager::abort", skip_all, fields(
         request = ?request
     ))]
-    async fn abort(&self, request: AbortRequest) -> Result<()> {
+    pub async fn abort(&self, request: AbortRequest) -> Result<()> {
         if failure_sim::abort_should_fail() {
             return Err(anyhow!("simulating(ERROR): abort failure"));
         }
@@ -210,7 +210,7 @@ impl TransactionManager {
     #[tracing::instrument(name = "TransactionManager::commit", skip_all, fields(
         request = ?request
     ))]
-    async fn commit(&self, request: CommitRequest) -> Result<()> {
+    pub async fn commit(&self, request: CommitRequest) -> Result<()> {
         if failure_sim::commit_should_fail() {
             return Err(anyhow!("simulating(ERROR): commit failure"));
         }
@@ -223,6 +223,6 @@ impl TransactionManager {
             .await?;
         self.stable_storage.flush().await?;
 
-        todo!()
+        Ok(())
     }
 }
