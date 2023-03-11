@@ -5,7 +5,7 @@ use anyhow::Result;
 use axum::{
     http::{Response, StatusCode},
     routing::post,
-    Extension, Json, Router,
+    Extension, Router,
 };
 use std::sync::Arc;
 use tracing::{error, info};
@@ -19,7 +19,7 @@ pub async fn start(port: u16, transaction_manager: Arc<TransactionManager>) -> R
         .layer(Extension(transaction_manager));
     let addr = format!("0.0.0.0:{port}").parse()?;
 
-    info!(?addr, "starting server");
+    info!(?addr, "starting http server");
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await?;
@@ -27,18 +27,24 @@ pub async fn start(port: u16, transaction_manager: Arc<TransactionManager>) -> R
     Ok(())
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct HandleRequestInput {
-    pub op: u8,
-}
-
-#[tracing::instrument(name = "handle_request", skip_all)]
+#[tracing::instrument(name = "handle_request", skip_all, fields(
+    op = ?op
+))]
 #[axum_macros::debug_handler]
 async fn handle_request(
     Extension(transaction_manager): Extension<Arc<TransactionManager>>,
-    Json(input): Json<HandleRequestInput>,
+    op: String,
 ) -> Response<String> {
-    match transaction_manager.handle_request(input.op).await {
+    let op = match op.parse::<u8>() {
+        Err(err) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(format!("invalid operation. op={op} err={err}"))
+                .unwrap()
+        }
+        Ok(v) => v,
+    };
+    match transaction_manager.handle_request(op).await {
         Ok(_) => Response::builder()
             .status(StatusCode::OK)
             .body("OK".to_owned())
