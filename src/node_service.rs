@@ -37,7 +37,7 @@ impl NodeService {
 
         let mut client = match clients.get(&host_addr).cloned() {
             None => {
-                let client = NodeClient::connect(host_addr.clone()).await?;
+                let client = NodeClient::connect(format!("http://{host_addr}")).await?;
                 clients.insert(host_addr, client.clone());
                 client
             }
@@ -64,7 +64,7 @@ impl NodeService {
 
         let mut client = match clients.get(&host_addr).cloned() {
             None => {
-                let client = NodeClient::connect(host_addr.clone()).await?;
+                let client = NodeClient::connect(format!("http://{host_addr}")).await?;
                 clients.insert(host_addr, client.clone());
                 client
             }
@@ -91,7 +91,7 @@ impl NodeService {
 
         let mut client = match clients.get(&host_addr).cloned() {
             None => {
-                let client = NodeClient::connect(host_addr.clone()).await?;
+                let client = NodeClient::connect(format!("http://{host_addr}")).await?;
                 clients.insert(host_addr, client.clone());
                 client
             }
