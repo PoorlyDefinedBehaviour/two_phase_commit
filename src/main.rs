@@ -18,6 +18,8 @@ mod node_service;
 mod storage;
 mod transaction_manager;
 
+const MAX_CLUSTER_MEMBERS: usize = 3;
+
 #[derive(Debug, Parser)]
 struct Cli {
     /// The id of the process.
@@ -27,7 +29,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    const MAX_CLUSTER_MEMBERS: usize = 3;
+    tracing_subscriber::fmt().init();
+
     let cli = Cli::parse();
     assert!(
         cli.id < MAX_CLUSTER_MEMBERS,
@@ -37,13 +40,13 @@ async fn main() -> Result<()> {
     let http_server_port: u16 = format!("500{}", cli.id).parse()?;
     let grpc_server_addr = format!("[::1]:600{}", cli.id).parse().unwrap();
 
-    let cluster_members: Vec<String> = (0..=MAX_CLUSTER_MEMBERS)
+    let cluster_members: Vec<String> = (0..MAX_CLUSTER_MEMBERS)
         .into_iter()
         .filter(|id| *id != cli.id)
         .map(|id| format!("[::1]:600{id}",))
         .collect();
 
-    let stable_storage = Arc::new(DiskLogStorage::new("./log").await?);
+    let stable_storage = Arc::new(DiskLogStorage::new(&format!("./log/node_{}", cli.id)).await?);
 
     let config = Config {
         cluster_members,
