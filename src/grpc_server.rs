@@ -70,7 +70,7 @@ impl core_proto::core_proto::node_server::Node for NodeService {
                 error!(?err, "unable to handle abort request");
                 Err(Status::internal(err.to_string()))
             }
-            Ok(()) => Ok(Response::new(AbortResponse { ok: true })),
+            Ok(aborted) => Ok(Response::new(AbortResponse { ok: aborted })),
         }
     }
 
@@ -86,7 +86,7 @@ impl core_proto::core_proto::node_server::Node for NodeService {
                 error!(?err, "unable to handle commit request");
                 Err(Status::internal(err.to_string()))
             }
-            Ok(()) => Ok(Response::new(CommitResponse { ok: true })),
+            Ok(committed) => Ok(Response::new(CommitResponse { ok: committed })),
         }
     }
 

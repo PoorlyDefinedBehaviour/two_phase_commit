@@ -205,9 +205,14 @@ impl TransactionManager {
     #[tracing::instrument(name = "TransactionManager::abort", skip_all, fields(
         request = ?request
     ))]
-    pub async fn abort(&self, request: AbortRequest) -> Result<()> {
+    pub async fn abort(&self, request: AbortRequest) -> Result<bool> {
         if failure_sim::abort_should_fail() {
             return Err(anyhow!("simulating(ERROR): abort failure"));
+        }
+
+        if let Some(entry) = self.stable_storage.get(request.id.as_bytes()).await {
+            let transaction_decision = TransactionDecision::decode(entry.as_ref())?;
+            return Ok(transaction_decision.state == TRANSACTION_STATE_ABORTED);
         }
 
         let decision = TransactionDecision {
@@ -221,16 +226,21 @@ impl TransactionManager {
             .await?;
         self.stable_storage.flush().await?;
 
-        Ok(())
+        Ok(true)
     }
 
     /// Handles a request to commit when acting as a participant.
     #[tracing::instrument(name = "TransactionManager::commit", skip_all, fields(
         request = ?request
     ))]
-    pub async fn commit(&self, request: CommitRequest) -> Result<()> {
+    pub async fn commit(&self, request: CommitRequest) -> Result<bool> {
         if failure_sim::commit_should_fail() {
             return Err(anyhow!("simulating(ERROR): commit failure"));
+        }
+
+        if let Some(entry) = self.stable_storage.get(request.id.as_bytes()).await {
+            let transaction_decision = TransactionDecision::decode(entry.as_ref())?;
+            return Ok(transaction_decision.state == TRANSACTION_STATE_COMMITTED);
         }
 
         let decision = TransactionDecision {
@@ -244,7 +254,7 @@ impl TransactionManager {
             .await?;
         self.stable_storage.flush().await?;
 
-        Ok(())
+        Ok(true)
     }
 
     /// Returns a boolean indicating whether a transaction has been committed.
