@@ -13,10 +13,10 @@ use tracing::{error, info};
 use crate::transaction_manager::TransactionManager;
 
 #[tracing::instrument(name = "http_server::start", skip_all)]
-pub async fn start(transaction_manager: TransactionManager, port: u16) -> Result<()> {
+pub async fn start(port: u16, transaction_manager: Arc<TransactionManager>) -> Result<()> {
     let app = Router::new()
         .route("/", post(handle_request))
-        .layer(Extension(Arc::new(transaction_manager)));
+        .layer(Extension(transaction_manager));
     let addr = format!("0.0.0.0:{port}").parse()?;
 
     info!(?addr, "starting server");

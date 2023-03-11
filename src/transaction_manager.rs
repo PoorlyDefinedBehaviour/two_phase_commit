@@ -1,25 +1,36 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
-use tokio::sync::Mutex;
-use tonic::{transport::Channel, Request};
+
+use tonic::Request;
 use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
     core_proto::{
-        node_client::NodeClient, AbortRequest, CommitRequest, CommitTransactionDecision, HostAddr,
-        PrepareCommitRequest, TransactionAborted, TransactionCommitted, HOST_ADDR_HEADER_KEY,
+        AbortRequest, CommitRequest, HostAddr, PrepareCommitRequest, TransactionDecision,
     },
     failure_sim,
+    node_service::NodeService,
     storage::StableStorage,
 };
 
+// TODO: should use an enum so the compiler errors when a case is not checked.
+const TRANSACTION_STATE_DECIDED_TO_COMMIT: i32 = 1;
+const TRANSACTION_STATE_COMMITTED: i32 = 2;
+const TRANSACTION_STATE_ABORTED: i32 = 3;
+
 #[derive(Debug)]
 pub struct Config {
+    /// Addresses of members of the cluster.
+    pub cluster_members: Vec<HostAddr>,
+
     /// How long to wait before an in-flight prepare request is canceled if a response is not received.
     pub prepare_request_timeout: Duration,
+
+    /// How long to wait before an in-flight abort request is canceled if a response is not received.
+    pub abort_request_timeout: Duration,
 
     /// How long to wait before an in-flight commit request is canceled if a response is not received.
     pub commit_request_timeout: Duration,
@@ -28,7 +39,7 @@ pub struct Config {
 /// Responsible for requesting the participaints in a transaction to
 /// prepare to commit and then to commit if possible.
 pub struct TransactionManager {
-    node_services: Mutex<HashMap<HostAddr, NodeClient<Channel>>>,
+    node_service: NodeService,
     stable_storage: Arc<dyn StableStorage>,
     config: Config,
 }
@@ -38,12 +49,12 @@ impl TransactionManager {
         config = ?config
     ))]
     pub fn new(
-        node_services: HashMap<HostAddr, NodeClient<Channel>>,
+        node_service: NodeService,
         stable_storage: Arc<dyn StableStorage>,
         config: Config,
     ) -> Self {
         Self {
-            node_services: Mutex::new(node_services),
+            node_service,
             stable_storage,
             config,
         }
@@ -54,8 +65,6 @@ impl TransactionManager {
         op = op
     ))]
     pub async fn handle_request(&self, op: u8) -> Result<()> {
-        let mut node_services = self.node_services.lock().await;
-
         let op_id = Uuid::new_v4().to_string();
         tracing::Span::current().record("op_id", &op_id);
 
@@ -65,27 +74,26 @@ impl TransactionManager {
         };
 
         // Check if every participant is willing to go ahead with the transaction.
-        let responses = futures::future::join_all(node_services.iter_mut().map(
-            |(_host_addr, node_service)| {
-                let mut request = Request::new(prepare_commit_request.clone());
-                request.set_timeout(self.config.prepare_request_timeout);
-                node_service.prepare_commit(request)
-            },
-        ))
-        .await;
+        let responses =
+            futures::future::join_all(self.config.cluster_members.clone().into_iter().map(
+                |host_addr| async {
+                    let mut request = Request::new(prepare_commit_request.clone());
+                    request.set_timeout(self.config.prepare_request_timeout);
+                    let host_addr_clone = host_addr.clone();
+                    (
+                        host_addr,
+                        self.node_service
+                            .prepare_commit(host_addr_clone, request)
+                            .await,
+                    )
+                },
+            ))
+            .await;
 
         let mut ok_responses = Vec::new();
 
-        for result in responses {
+        for (host_addr, result) in responses {
             if let Ok(response) = result {
-                let host_addr = response
-                    .metadata()
-                    .get(HOST_ADDR_HEADER_KEY)
-                    .expect("bug: response is missing host address")
-                    .to_str()
-                    .expect("bug: host address is not a string")
-                    .to_owned();
-
                 if response.into_inner().ok {
                     ok_responses.push(host_addr);
                 }
@@ -93,17 +101,16 @@ impl TransactionManager {
         }
 
         // If not all participants are willing to commit, abort the transaction.
-        if ok_responses.len() != node_services.len() {
+        if ok_responses.len() != self.config.cluster_members.len() {
             for host_addr in ok_responses {
-                let node_service = node_services
-                    .get_mut(&host_addr)
-                    .expect("bug: every host address must exist in the node services map");
-
                 // If we fail to abort, just ignore the error. The participant will poll
                 // the transaction manager at a later time and find out that the transaction
                 // has been aborted because the manager won't remember the transaction.
-                if let Err(err) = node_service.abort(AbortRequest { id: op_id.clone() }).await {
-                    error!(?err, id = ?op_id, "unable to abort request");
+                let mut request = Request::new(AbortRequest { id: op_id.clone() });
+                request.set_timeout(self.config.abort_request_timeout);
+
+                if let Err(err) = self.node_service.abort(host_addr.clone(), request).await {
+                    error!(?err, id = ?op_id, ?host_addr, "unable to abort request");
                 };
             }
 
@@ -113,27 +120,31 @@ impl TransactionManager {
         }
 
         // Store the decision in stable storage.
-        let decision = CommitTransactionDecision { id: op_id.clone() };
+        let decision = TransactionDecision {
+            id: op_id.clone(),
+            state: TRANSACTION_STATE_DECIDED_TO_COMMIT,
+        };
         let mut buffer = Vec::new();
         decision
             .encode(&mut buffer)
             .context("encoding commit transaction decision")?;
         self.stable_storage
-            .append(op_id.as_bytes(), &buffer)
+            .append(op_id.as_bytes().to_vec(), buffer)
             .await?;
         self.stable_storage.flush().await?;
 
         // Ask every participant to commit the transaction.
         let commit_request = CommitRequest { id: op_id.clone() };
 
-        let responses = futures::future::join_all(node_services.iter_mut().map(
-            |(_host_addr, node_service)| {
-                let mut request = Request::new(commit_request.clone());
-                request.set_timeout(self.config.commit_request_timeout);
-                node_service.commit(request)
-            },
-        ))
-        .await;
+        let responses =
+            futures::future::join_all(self.config.cluster_members.clone().into_iter().map(
+                |host_addr| {
+                    let mut request = Request::new(commit_request.clone());
+                    request.set_timeout(self.config.commit_request_timeout);
+                    self.node_service.commit(host_addr, request)
+                },
+            ))
+            .await;
 
         let every_participant_committed = responses.into_iter().all(|result| {
             result
@@ -142,13 +153,16 @@ impl TransactionManager {
         });
 
         if every_participant_committed {
-            let transaction_commited = TransactionCommitted { id: op_id.clone() };
+            let transaction_commited = TransactionDecision {
+                id: op_id.clone(),
+                state: TRANSACTION_STATE_COMMITTED,
+            };
             let mut buffer = Vec::new();
             transaction_commited.encode(&mut buffer)?;
 
             // There's no need to flush this one since the commit decision has already been flushed.
             self.stable_storage
-                .append(op_id.as_bytes(), &buffer)
+                .append(op_id.as_bytes().to_vec(), buffer)
                 .await?;
         }
 
@@ -170,15 +184,16 @@ impl TransactionManager {
         }
 
         // Assuming the participant can proceed with the trasaction.
-        let commit_decision = CommitTransactionDecision {
+        let commit_decision = TransactionDecision {
             id: request.id.clone(),
+            state: TRANSACTION_STATE_DECIDED_TO_COMMIT,
         };
 
         // Store the decision in stable storage so it can be remembed when a crash happens.
         let mut buffer = Vec::new();
         commit_decision.encode(&mut buffer)?;
         self.stable_storage
-            .append(commit_decision.id.as_bytes(), &buffer)
+            .append(commit_decision.id.as_bytes().to_vec(), buffer)
             .await?;
         self.stable_storage.flush().await?;
 
@@ -195,11 +210,14 @@ impl TransactionManager {
             return Err(anyhow!("simulating(ERROR): abort failure"));
         }
 
-        let decision = TransactionAborted { id: request.id };
+        let decision = TransactionDecision {
+            id: request.id,
+            state: TRANSACTION_STATE_ABORTED,
+        };
         let mut buffer = Vec::new();
         decision.encode(&mut buffer)?;
         self.stable_storage
-            .append(decision.id.as_bytes(), &buffer)
+            .append(decision.id.as_bytes().to_vec(), buffer)
             .await?;
         self.stable_storage.flush().await?;
 
@@ -215,14 +233,40 @@ impl TransactionManager {
             return Err(anyhow!("simulating(ERROR): commit failure"));
         }
 
-        let decision = TransactionCommitted { id: request.id };
+        let decision = TransactionDecision {
+            id: request.id,
+            state: TRANSACTION_STATE_COMMITTED,
+        };
         let mut buffer = Vec::new();
         decision.encode(&mut buffer)?;
         self.stable_storage
-            .append(decision.id.as_bytes(), &buffer)
+            .append(decision.id.as_bytes().to_vec(), buffer)
             .await?;
         self.stable_storage.flush().await?;
 
         Ok(())
+    }
+
+    /// Returns a boolean indicating whether a transaction has been committed.
+    /// Unknown and transactions have been deleted from the log are considered aborted.
+    #[tracing::instrument(name = "TransactionManager::query_transaction_state", skip_all, fields(
+        transaction_id = ?transaction_id
+    ))]
+    pub async fn query_transaction_state(&self, transaction_id: &str) -> Result<bool> {
+        if failure_sim::query_transaction_state_should_fail() {
+            return Err(anyhow!("simulating(ERROR): query transaction failure"));
+        }
+
+        match self.stable_storage.get(transaction_id.as_bytes()).await {
+            None => Ok(false),
+            Some(value) => {
+                let transaction_decision = TransactionDecision::decode(value.as_ref())?;
+
+                Ok(
+                    transaction_decision.state == TRANSACTION_STATE_DECIDED_TO_COMMIT
+                        || transaction_decision.state == TRANSACTION_STATE_COMMITTED,
+                )
+            }
+        }
     }
 }

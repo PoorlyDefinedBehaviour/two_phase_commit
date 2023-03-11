@@ -1,13 +1,20 @@
+use std::{sync::Arc, time::Duration};
+
 use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
-use crate::transaction_manager::TransactionManager;
+use crate::{
+    node_service::NodeService,
+    storage::DiskLogStorage,
+    transaction_manager::{Config, TransactionManager},
+};
 
 mod core_proto;
 mod failure_sim;
 mod grpc_server;
 mod http_server;
+mod node_service;
 mod storage;
 mod transaction_manager;
 
@@ -18,40 +25,53 @@ struct Cli {
     id: usize,
 }
 
-#[derive(Debug)]
-struct Config {
-    cluster_members: Vec<String>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    const MAX_CLUSTER_MEMBERS: usize = 5;
     let cli = Cli::parse();
-    assert!(cli.id <= 5, "process id cannot be greater than 5");
+    assert!(
+        cli.id <= MAX_CLUSTER_MEMBERS,
+        "process id cannot be greater than {MAX_CLUSTER_MEMBERS}"
+    );
 
     let http_server_port: u16 = format!("500{}", cli.id).parse()?;
     let grpc_server_addr = format!("[::1]:600{}", cli.id).parse().unwrap();
 
+    let cluster_members: Vec<String> = (0..=MAX_CLUSTER_MEMBERS)
+        .into_iter()
+        .filter(|id| *id != cli.id)
+        .map(|id| format!("[::1]:600{id}",))
+        .collect();
+
+    let stable_storage = Arc::new(DiskLogStorage::new("./log").await?);
+
     let config = Config {
-        cluster_members: vec![],
+        cluster_members,
+        prepare_request_timeout: Duration::from_secs(2),
+        abort_request_timeout: Duration::from_secs(2),
+        commit_request_timeout: Duration::from_secs(2),
     };
 
-    let node_services = todo!();
+    let transaction_manager = Arc::new(TransactionManager::new(
+        NodeService::new(),
+        stable_storage,
+        config,
+    ));
 
-    let transaction_manager = TransactionManager::new(node_services);
+    {
+        let transaction_manager = Arc::clone(&transaction_manager);
+        tokio::spawn(async move {
+            if let Err(err) = grpc_server::start(grpc_server_addr, transaction_manager).await {
+                error!(?err, "unable to start grpc server");
+                std::process::exit(1);
+            }
+        });
+    }
 
-    tokio::spawn(async move {
-        if let Err(err) = grpc_server::start(grpc_server_addr).await {
-            error!(?err, "unable to start grpc server");
-            std::process::exit(1);
-        }
-    });
-
-    tokio::spawn(async move {
-        if let Err(err) = http_server::start(transaction_manager, http_server_port).await {
-            error!(?err, "unable to start http server");
-            std::process::exit(1);
-        }
-    });
+    if let Err(err) = http_server::start(http_server_port, transaction_manager).await {
+        error!(?err, "unable to start http server");
+        std::process::exit(1);
+    }
 
     Ok(())
 }

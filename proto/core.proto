@@ -6,6 +6,7 @@ service Node {
     rpc PrepareCommit(PrepareCommitRequest) returns (PrepareCommitResponse) {}
     rpc Abort(AbortRequest) returns (AbortResponse) {}
     rpc Commit(CommitRequest) returns (CommitResponse) {}
+    rpc QueryTransactionState(QueryTransactionStateRequest) returns (QueryTransactionStateResponse) {}
 }
 
 message PrepareCommitRequest {
@@ -33,14 +34,16 @@ message CommitResponse {
     bool ok = 1;
 }
 
-message CommitTransactionDecision {
+message QueryTransactionStateRequest {
     string id = 1;
 }
 
-message TransactionCommitted {
-    string id = 1;
+message QueryTransactionStateResponse {
+    bool committed = 1;
 }
 
-message TransactionAborted {
+message TransactionDecision {
     string id = 1;
+    int32 state = 2;
 }
+

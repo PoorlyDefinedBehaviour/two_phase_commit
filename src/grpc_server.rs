@@ -7,7 +7,7 @@ use crate::{core_proto, transaction_manager::TransactionManager};
 use anyhow::Result;
 use core_proto::{
     AbortRequest, AbortResponse, CommitRequest, CommitResponse, PrepareCommitRequest,
-    PrepareCommitResponse,
+    PrepareCommitResponse, QueryTransactionStateRequest, QueryTransactionStateResponse,
 };
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::error;
@@ -87,6 +87,26 @@ impl core_proto::core_proto::node_server::Node for NodeService {
                 Err(Status::internal(err.to_string()))
             }
             Ok(()) => Ok(Response::new(CommitResponse { ok: true })),
+        }
+    }
+
+    #[tracing::instrument(name = "NodeService::query_transaction_state", skip_all, fields(
+        request = ?request
+    ))]
+    async fn query_transaction_state(
+        &self,
+        request: Request<QueryTransactionStateRequest>,
+    ) -> Result<Response<QueryTransactionStateResponse>, Status> {
+        match self
+            .transaction_manager
+            .query_transaction_state(&request.into_inner().id)
+            .await
+        {
+            Err(err) => {
+                error!(?err, "unable to handle query transaction state request");
+                Err(Status::internal(err.to_string()))
+            }
+            Ok(committed) => Ok(Response::new(QueryTransactionStateResponse { committed })),
         }
     }
 }

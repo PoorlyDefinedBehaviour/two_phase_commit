@@ -17,3 +17,7 @@ pub fn commit_should_fail() -> bool {
 pub fn abort_should_fail() -> bool {
     rand::thread_rng().gen_bool(0.9)
 }
+
+pub fn query_transaction_state_should_fail() -> bool {
+    rand::thread_rng().gen_bool(0.9)
+}
