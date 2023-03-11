@@ -27,11 +27,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    const MAX_CLUSTER_MEMBERS: usize = 5;
+    const MAX_CLUSTER_MEMBERS: usize = 3;
     let cli = Cli::parse();
     assert!(
-        cli.id <= MAX_CLUSTER_MEMBERS,
-        "process id cannot be greater than {MAX_CLUSTER_MEMBERS}"
+        cli.id < MAX_CLUSTER_MEMBERS,
+        "process id must be less than {MAX_CLUSTER_MEMBERS}"
     );
 
     let http_server_port: u16 = format!("500{}", cli.id).parse()?;
