@@ -9,6 +9,7 @@ use tokio::{
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::BufWriter;
+use tracing::info;
 
 #[async_trait]
 pub trait StableStorage: Send + Sync {
@@ -40,13 +41,16 @@ impl DiskLogStorage {
         file_path = ?file_path
     ))]
     pub async fn new(file_path: &str) -> Result<Self> {
+        let file_name = format!("{file_path}/data.log");
+
+        info!(?file_path, ?file_name, "creating log file");
         tokio::fs::create_dir_all(file_path).await?;
 
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
-            .open(format!("{file_path}/data.log"))
+            .open(file_name)
             .await?;
 
         let metadata = file.metadata().await?;

@@ -10,12 +10,13 @@ use core_proto::{
     PrepareCommitResponse, QueryTransactionStateRequest, QueryTransactionStateResponse,
 };
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::error;
+use tracing::{error, info};
 
 #[tracing::instrument(name = "grpc_server::start", skip_all, fields(
     addr = ?addr
 ))]
 pub async fn start(addr: SocketAddr, transaction_manager: Arc<TransactionManager>) -> Result<()> {
+    info!(?addr, "starting grpc server");
     let svc = core_proto::node_server::NodeServer::new(NodeService::new(transaction_manager));
 
     Server::builder().add_service(svc).serve(addr).await?;

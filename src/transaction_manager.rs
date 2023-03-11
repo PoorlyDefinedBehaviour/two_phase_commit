@@ -93,9 +93,19 @@ impl TransactionManager {
         let mut ok_responses = Vec::new();
 
         for (host_addr, result) in responses {
-            if let Ok(response) = result {
-                if response.into_inner().ok {
-                    ok_responses.push(host_addr);
+            match result {
+                Err(err) => {
+                    error!(?host_addr, ?err, "error response to prepare commit request");
+                }
+                Ok(response) => {
+                    if response.into_inner().ok {
+                        ok_responses.push(host_addr);
+                    } else {
+                        info!(
+                            ?host_addr,
+                            "node is not willing to go ahead with the transaction"
+                        );
+                    }
                 }
             }
         }
@@ -138,33 +148,51 @@ impl TransactionManager {
 
         let responses =
             futures::future::join_all(self.config.cluster_members.clone().into_iter().map(
-                |host_addr| {
+                |host_addr| async {
                     let mut request = Request::new(commit_request.clone());
                     request.set_timeout(self.config.commit_request_timeout);
-                    self.node_service.commit(host_addr, request)
+                    (
+                        host_addr.clone(),
+                        self.node_service.commit(host_addr, request).await,
+                    )
                 },
             ))
             .await;
 
-        let every_participant_committed = responses.into_iter().all(|result| {
-            result
-                .map(|response| response.into_inner().ok)
-                .unwrap_or(false)
-        });
+        let every_participant_committed =
+            responses
+                .into_iter()
+                .all(|(host_addr, result)| match result {
+                    Err(err) => {
+                        error!(
+                            ?host_addr,
+                            ?err,
+                            "participant returned error response for commit request"
+                        );
+                        false
+                    }
+                    Ok(response) => {
+                        info!(?host_addr, "participant did not commit transaction");
+                        response.into_inner().ok
+                    }
+                });
 
-        if every_participant_committed {
-            let transaction_commited = TransactionDecision {
-                id: op_id.clone(),
-                state: TRANSACTION_STATE_COMMITTED,
-            };
-            let mut buffer = Vec::new();
-            transaction_commited.encode(&mut buffer)?;
-
-            // There's no need to flush this one since the commit decision has already been flushed.
-            self.stable_storage
-                .append(op_id.as_bytes().to_vec(), buffer)
-                .await?;
+        if !every_participant_committed {
+            return Err(anyhow!("transaction wasn't committed by every participant"));
         }
+
+        // Every participant committed the transaction.
+        let transaction_commited = TransactionDecision {
+            id: op_id.clone(),
+            state: TRANSACTION_STATE_COMMITTED,
+        };
+        let mut buffer = Vec::new();
+        transaction_commited.encode(&mut buffer)?;
+
+        // There's no need to flush this one since the commit decision has already been flushed.
+        self.stable_storage
+            .append(op_id.as_bytes().to_vec(), buffer)
+            .await?;
 
         Ok(())
     }
@@ -175,11 +203,12 @@ impl TransactionManager {
     ))]
     pub async fn prepare_commit(&self, request: PrepareCommitRequest) -> Result<bool> {
         if failure_sim::prepare_commit_should_fail() {
-            info!("simulating(ERROR): participant cannot go ahead with the transaction because");
-            return Err(anyhow!("simulating(ERROR): participant is in error mode"));
+            return Err(anyhow!(
+                "simulating(ERROR): prepare commit fails because participant is in error mode"
+            ));
         }
-        if !failure_sim::participant_should_be_able_to_commit() {
-            info!("simulating: participant is unable to go ahead with the transaction");
+        if failure_sim::participant_should_not_be_able_to_commit() {
+            info!("simulating(returns false): participant rejects prepare commit request");
             return Ok(false);
         }
 
@@ -238,9 +267,21 @@ impl TransactionManager {
             return Err(anyhow!("simulating(ERROR): commit failure"));
         }
 
+        // If the request id is already in the log storage, it means the transaction manager
+        // has failed and it is sending a duplicated request.
         if let Some(entry) = self.stable_storage.get(request.id.as_bytes()).await {
             let transaction_decision = TransactionDecision::decode(entry.as_ref())?;
-            return Ok(transaction_decision.state == TRANSACTION_STATE_COMMITTED);
+
+            if transaction_decision.state == TRANSACTION_STATE_COMMITTED {
+                // Let the transaction mananager know that the transaction has already beeen comitted.
+                return Ok(true);
+            } else if transaction_decision.state == TRANSACTION_STATE_ABORTED {
+                // Let the transaction mananager know that the transaction has already beeen aborted.
+                return Ok(false);
+            }
+
+            // The transaction has been accepted but it hasn't been committed yet.
+            assert!(transaction_decision.state == TRANSACTION_STATE_DECIDED_TO_COMMIT);
         }
 
         let decision = TransactionDecision {
