@@ -12,5 +12,4 @@ curl localhost:5000 -XPOST <int>
 
 # TODO
 
-- Manager needs to retry when a participant is unable to commit
 - Participant needs to check if a transaction has been committed or aborted after not receiving a decision from the manager after some time.

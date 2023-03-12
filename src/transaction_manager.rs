@@ -1,10 +1,14 @@
-use std::{sync::Arc, time::Duration};
-
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Weak},
+    time::Duration,
+};
+use tokio::sync::Mutex;
 
 use tonic::Request;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -16,10 +20,14 @@ use crate::{
     storage::StableStorage,
 };
 
+type TransactionId = String;
+
 // TODO: should use an enum so the compiler errors when a case is not checked.
-const TRANSACTION_STATE_DECIDED_TO_COMMIT: i32 = 1;
-const TRANSACTION_STATE_COMMITTED: i32 = 2;
-const TRANSACTION_STATE_ABORTED: i32 = 3;
+type TransactionState = i32;
+
+const TRANSACTION_STATE_DECIDED_TO_COMMIT: TransactionState = 1;
+const TRANSACTION_STATE_COMMITTED: TransactionState = 2;
+const TRANSACTION_STATE_ABORTED: TransactionState = 3;
 
 #[derive(Debug)]
 pub struct Config {
@@ -34,6 +42,10 @@ pub struct Config {
 
     /// How long to wait before an in-flight commit request is canceled if a response is not received.
     pub commit_request_timeout: Duration,
+
+    /// The amount of time the system should wait before checking if there are
+    /// transactions be completed by at least one node again and trying to complete them.
+    pub try_to_commit_transactions_interval: Duration,
 }
 
 /// Responsible for requesting the participaints in a transaction to
@@ -42,6 +54,18 @@ pub struct TransactionManager {
     node_service: NodeService,
     stable_storage: Arc<dyn StableStorage>,
     config: Config,
+    /// Mapping from transaction id to the transaction state.
+    /// The map includes only transactions that need to be aborted
+    /// or committed.
+    pending_transactions: Mutex<HashMap<TransactionId, PendingTransaction>>,
+}
+
+#[derive(Debug)]
+struct PendingTransaction {
+    /// Should the transaction state or commit?
+    desired_state: TransactionState,
+    /// Nodes that haven't committed or aborted the transaction yet.
+    pending_nodes: HashSet<String>,
 }
 
 impl TransactionManager {
@@ -52,12 +76,22 @@ impl TransactionManager {
         node_service: NodeService,
         stable_storage: Arc<dyn StableStorage>,
         config: Config,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        let try_to_commit_transactions_interval = config.try_to_commit_transactions_interval;
+
+        let transaction_manager = Arc::new(Self {
             node_service,
             stable_storage,
             config,
-        }
+            pending_transactions: Mutex::new(HashMap::new()),
+        });
+
+        tokio::spawn(try_to_commit_transactions_periodically(
+            try_to_commit_transactions_interval,
+            Arc::downgrade(&transaction_manager),
+        ));
+
+        transaction_manager
     }
 
     #[tracing::instrument(name = "Manager::handle_request", skip_all, fields(
@@ -112,6 +146,7 @@ impl TransactionManager {
 
         // If not all participants are willing to commit, abort the transaction.
         if ok_responses.len() != self.config.cluster_members.len() {
+            // TODO: could be done in parallel.
             for host_addr in ok_responses {
                 // If we fail to abort, just ignore the error. The participant will poll
                 // the transaction manager at a later time and find out that the transaction
@@ -119,6 +154,9 @@ impl TransactionManager {
                 let mut request = Request::new(AbortRequest { id: op_id.clone() });
                 request.set_timeout(self.config.abort_request_timeout);
 
+                // If the request to abort fails, the node with the pending request will query the transaction manager
+                // to get the state of the transaction and find out that the transaction has been aborted
+                // because it is not in the log.
                 if let Err(err) = self.node_service.abort(host_addr.clone(), request).await {
                     error!(?err, id = ?op_id, ?host_addr, "unable to abort request");
                 };
@@ -142,6 +180,8 @@ impl TransactionManager {
             .append(op_id.as_bytes().to_vec(), buffer)
             .await?;
         self.stable_storage.flush().await?;
+
+        let mut pending_transactions = self.pending_transactions.lock().await;
 
         // Ask every participant to commit the transaction.
         let commit_request = CommitRequest { id: op_id.clone() };
@@ -178,6 +218,15 @@ impl TransactionManager {
                 });
 
         if !every_participant_committed {
+            // Mark the transaction as pending so it is retried later.
+            pending_transactions.insert(
+                op_id.clone(),
+                PendingTransaction {
+                    desired_state: TRANSACTION_STATE_DECIDED_TO_COMMIT,
+                    pending_nodes: self.config.cluster_members.iter().cloned().collect(),
+                },
+            );
+
             return Err(anyhow!("transaction wasn't committed by every participant"));
         }
 
@@ -319,5 +368,97 @@ impl TransactionManager {
                 )
             }
         }
+    }
+
+    /// Tries to commit transactions that failed to commit.
+    #[tracing::instrument(name = "try_to_commit_transactions", skip_all)]
+    async fn try_to_commit_transactions(&self) {
+        loop {
+            let mut pending_transactions = self.pending_transactions.lock().await;
+            let mut completed_transactions = Vec::new();
+
+            for (transaction_id, pending_transaction) in pending_transactions.iter_mut() {
+                info!(?transaction_id, "trying to complete transaction");
+                // Every pending transaction should be in the state TRANSACTION_STATE_DECIDED_TO_COMMIT.
+                assert!(pending_transaction.desired_state == TRANSACTION_STATE_DECIDED_TO_COMMIT);
+
+                let futures =
+                    pending_transaction
+                        .pending_nodes
+                        .iter()
+                        .cloned()
+                        .map(|host_addr| async {
+                            // If we fail to abort, just ignore the error. The participant will poll
+                            // the transaction manager at a later time and find out that the transaction
+                            // has been aborted because the manager won't remember the transaction.
+                            let mut request = Request::new(CommitRequest {
+                                id: transaction_id.to_owned(),
+                            });
+                            request.set_timeout(self.config.abort_request_timeout);
+
+                            (
+                                host_addr.clone(),
+                                self.node_service.commit(host_addr, request).await,
+                            )
+                        });
+
+                for (host_addr, result) in futures::future::join_all(futures).await {
+                    match result {
+                        Err(err) => {
+                            error!(
+                                ?err,
+                                "got error response when requesting node to complete transaction"
+                            );
+                        }
+                        Ok(response) => {
+                            if response.into_inner().ok {
+                                pending_transaction.pending_nodes.remove(&host_addr);
+                                // If every pending node completed the transaction,
+                                // mark it as completed so it can be removed from the pending transactions set.
+                                if pending_transaction.pending_nodes.is_empty() {
+                                    completed_transactions.push(transaction_id.clone());
+                                }
+                            } else {
+                                error!(?host_addr, "node was unable to complete transaction");
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!(
+                ?completed_transactions,
+                "completed {} out of {} transactions",
+                completed_transactions.len(),
+                pending_transactions.len()
+            );
+            for transaction_id in completed_transactions {
+                pending_transactions.remove(&transaction_id);
+            }
+        }
+    }
+}
+
+/// Tries to commit transactions that failed to commit.
+#[tracing::instrument(name = "try_to_commit_transactions", skip_all, fields(
+    interval = ?interval
+))]
+async fn try_to_commit_transactions_periodically(
+    interval: Duration,
+    transaction_manager: Weak<TransactionManager>,
+) {
+    loop {
+        match transaction_manager.upgrade() {
+            None => {
+                info!("transaction manager has been dropped, exiting loop");
+                return;
+            }
+            Some(transaction_manager) => {
+                transaction_manager.try_to_commit_transactions().await;
+            }
+        };
+
+        debug!("waiting before trying to complete transactions");
+        tokio::time::sleep(interval).await;
     }
 }
