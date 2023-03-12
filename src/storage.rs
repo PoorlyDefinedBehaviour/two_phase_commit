@@ -22,6 +22,10 @@ pub trait StableStorage: Send + Sync {
 
     /// Returns the value associated to the key if it exists.
     async fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+
+    // TODO: this copy is unecessary.
+    /// Returns a copy of the key value pairs that are in memory.
+    async fn entries(&self) -> BTreeMap<Vec<u8>, Vec<u8>>;
 }
 
 pub struct DiskLogStorage {
@@ -33,6 +37,7 @@ struct VolatileState {
     file_writer: BufWriter<File>,
     /// The position where the next entry will be added.
     position: u64,
+    /// The key value pairs the are in the storage.
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
@@ -135,5 +140,11 @@ impl StableStorage for DiskLogStorage {
     async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let volatile_state = self.volatile_state.lock().await;
         volatile_state.entries.get(key).cloned()
+    }
+
+    #[tracing::instrument(name = "DiskLogStorage::entries", skip_all)]
+    async fn entries(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let volatile_state = self.volatile_state.lock().await;
+        volatile_state.entries.clone()
     }
 }

@@ -56,7 +56,8 @@ async fn main() -> Result<()> {
         try_to_commit_transactions_interval: Duration::from_secs(5),
     };
 
-    let transaction_manager = TransactionManager::new(NodeService::new(), stable_storage, config);
+    let transaction_manager =
+        TransactionManager::new(NodeService::new(), stable_storage, config).await?;
 
     {
         let transaction_manager = Arc::clone(&transaction_manager);

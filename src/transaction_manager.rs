@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -72,18 +72,21 @@ impl TransactionManager {
     #[tracing::instrument(name = "Manager::new", skip_all, fields(
         config = ?config
     ))]
-    pub fn new(
+    pub async fn new(
         node_service: NodeService,
         stable_storage: Arc<dyn StableStorage>,
         config: Config,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
+        let entries = stable_storage.entries().await;
+
         let try_to_commit_transactions_interval = config.try_to_commit_transactions_interval;
+        let pending_transactions = TransactionManager::get_pending_transactions(&config, &entries)?;
 
         let transaction_manager = Arc::new(Self {
             node_service,
             stable_storage,
             config,
-            pending_transactions: Mutex::new(HashMap::new()),
+            pending_transactions: Mutex::new(pending_transactions),
         });
 
         tokio::spawn(try_to_commit_transactions_periodically(
@@ -91,7 +94,38 @@ impl TransactionManager {
             Arc::downgrade(&transaction_manager),
         ));
 
-        transaction_manager
+        Ok(transaction_manager)
+    }
+
+    /// Reads pending transactions from the log entries.
+    fn get_pending_transactions(
+        config: &Config,
+        entries: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<HashMap<TransactionId, PendingTransaction>> {
+        let mut pending_transactions = HashMap::new();
+
+        for (key, value) in entries {
+            let key = String::from_utf8(key.to_owned())?;
+
+            let transaction_decision = TransactionDecision::decode(value.as_ref())?;
+
+            if transaction_decision.state == TRANSACTION_STATE_DECIDED_TO_COMMIT {
+                pending_transactions.insert(
+                    key,
+                    PendingTransaction {
+                        desired_state: TRANSACTION_STATE_DECIDED_TO_COMMIT,
+                        pending_nodes: config.cluster_members.iter().cloned().collect(),
+                    },
+                );
+            } else if transaction_decision.state == TRANSACTION_STATE_ABORTED
+                || transaction_decision.state == TRANSACTION_STATE_ABORTED
+            {
+                // Is the transaction has been comitted or aborted, it is not pending.
+                pending_transactions.remove(&key);
+            }
+        }
+
+        Ok(pending_transactions)
     }
 
     #[tracing::instrument(name = "Manager::handle_request", skip_all, fields(
@@ -450,7 +484,7 @@ async fn try_to_commit_transactions_periodically(
     loop {
         match transaction_manager.upgrade() {
             None => {
-                info!("transaction manager has been dropped, exiting loop");
+                debug!("transaction manager has been dropped, exiting loop");
                 return;
             }
             Some(transaction_manager) => {
