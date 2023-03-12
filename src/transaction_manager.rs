@@ -45,7 +45,7 @@ pub struct Config {
 
     /// The amount of time the system should wait before checking if there are
     /// transactions be completed by at least one node again and trying to complete them.
-    pub try_to_commit_transactions_interval: Duration,
+    pub try_to_complete_transactions_interval: Duration,
 }
 
 /// Responsible for requesting the participaints in a transaction to
@@ -79,7 +79,7 @@ impl TransactionManager {
     ) -> Result<Arc<Self>> {
         let entries = stable_storage.entries().await;
 
-        let try_to_commit_transactions_interval = config.try_to_commit_transactions_interval;
+        let try_to_complete_transactions_interval = config.try_to_complete_transactions_interval;
         let pending_transactions = TransactionManager::get_pending_transactions(&config, &entries)?;
 
         let transaction_manager = Arc::new(Self {
@@ -89,8 +89,8 @@ impl TransactionManager {
             pending_transactions: Mutex::new(pending_transactions),
         });
 
-        tokio::spawn(try_to_commit_transactions_periodically(
-            try_to_commit_transactions_interval,
+        tokio::spawn(try_to_complete_transactions_periodically(
+            try_to_complete_transactions_interval,
             Arc::downgrade(&transaction_manager),
         ));
 
@@ -413,8 +413,8 @@ impl TransactionManager {
     }
 
     /// Tries to commit transactions that failed to commit.
-    #[tracing::instrument(name = "try_to_commit_transactions", skip_all)]
-    async fn try_to_commit_transactions(&self) {
+    #[tracing::instrument(name = "try_to_complete_transactions", skip_all)]
+    async fn try_to_complete_transactions(&self) {
         loop {
             let mut pending_transactions = self.pending_transactions.lock().await;
             let mut completed_transactions = Vec::new();
@@ -501,10 +501,10 @@ impl TransactionManager {
 }
 
 /// Tries to commit transactions that failed to commit.
-#[tracing::instrument(name = "try_to_commit_transactions", skip_all, fields(
+#[tracing::instrument(name = "try_to_complete_transactions", skip_all, fields(
     interval = ?interval
 ))]
-async fn try_to_commit_transactions_periodically(
+async fn try_to_complete_transactions_periodically(
     interval: Duration,
     transaction_manager: Weak<TransactionManager>,
 ) {
@@ -515,7 +515,7 @@ async fn try_to_commit_transactions_periodically(
                 return;
             }
             Some(transaction_manager) => {
-                transaction_manager.try_to_commit_transactions().await;
+                transaction_manager.try_to_complete_transactions().await;
             }
         };
 

@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
         prepare_request_timeout: Duration::from_secs(2),
         abort_request_timeout: Duration::from_secs(2),
         commit_request_timeout: Duration::from_secs(2),
-        try_to_commit_transactions_interval: Duration::from_secs(5),
+        try_to_complete_transactions_interval: Duration::from_secs(5),
     };
 
     let transaction_manager =
